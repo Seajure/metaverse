@@ -1,70 +1,51 @@
 (ns meta.verse
   (:refer-clojure :exclude [load require ns])
   (:require [clojure.java.io :as io]
-            [clojure.pprint :as pp])
+            [clojure.pprint :as pp]
+            [meta.verse.seed :as seed])
   (:import (java.security MessageDigest)
            (clojure.lang LineNumberingPushbackReader)))
 
-(defn sha1 [bytes]
-  (let [digest (.digest (MessageDigest/getInstance "SHA1") bytes)]
-    (format "%x" (BigInteger. 1 digest))))
+(defn qualify [lib rev]
+  ;; TODO: different separator?
+  (symbol (str lib "." rev)))
 
-(defonce ccl (.getContextClassLoader (Thread/currentThread)))
-
-(defn qualify [lib checksum]
-  ;; TODO: different separator
-  (symbol (str lib "." checksum)))
-
-(defn transform [ns-form checksum]
-  (let [transformed-ns (qualify (second ns-form) checksum)]
+(defn transform [ns-form rev]
+  (let [transformed-ns (qualify (second ns-form) rev)]
     `(clojure.core/ns ~transformed-ns ~@(drop 2 ns-form))))
 
-(defn read-all [resource]
-  (let [reader (LineNumberingPushbackReader. (io/reader resource))
-        forms (repeatedly #(read reader false ::eof))]
-    ;; TODO: add :file metadata
-    (take-while #(not= ::eof %) forms)))
+(defn read-body [reader filename]
+  (let [forms (repeatedly #(read reader false ::eof))]
+    (map #(vary-meta % assoc :file filename)
+         (take-while #(not= ::eof %) forms))))
 
-(defn transformed-sources [lib]
-  (let [matches (enumeration-seq (.findResources ccl lib))]
-    (for [match matches
-          :let [checksum (sha1 (.getBytes (slurp match)))
-                ;; TODO: the body must be *read* in the ns of the
-                ;; first element
-                [ns-form & body] (binding [*ns* (the-ns 'user)]
-                                   (read-all match))]]
-      (cons (transform ns-form checksum) body))))
-
-(defn load [lib]
-  ;; (clojure.core/load lib)
-  (doseq [transformed (transformed-sources lib)]
-    (binding [*ns* (find-ns 'user)]
-      (doseq [form transformed]
+(defn load [rev]
+  (binding [*ns* (find-ns 'user)]
+    (let [file (io/file seed/home rev)
+          reader (LineNumberingPushbackReader. (io/reader file))
+          ns-form (read reader)]
+      (eval (transform ns-form rev))
+      ;; must read after ns form has been evaluated
+      (doseq [form (read-body reader (str file))]
         (eval form)))))
-
-;; for debugging
-(defn pprint [lib]
-  (doseq [transformed (transformed-sources lib)]
-    (pp/pprint transformed)))
 
 (defn require [[lib & {:as opts} :as orig-args]]
   (if-let [rev (:rev opts)]
     (let [qualified-lib (qualify lib rev)]
-      ;; TODO: check *loaded-libs*, don't reload unless necessary
-      (load (str (subs (#'clojure.core/root-resource lib) 1) ".clj"))
+      ;; no need to support :reload with immutable namespaces
+      (when-not (contains? @@#'clojure.core/*loaded-libs* qualified-lib)
+        (load rev))
       (when-let [as (:as opts)]
         (ns-unalias *ns* as)
         (alias as qualified-lib))
-      ;; TODO: we might need two concepts of "loaded" for this
+      (when-let [refer (:refer opts)]
+        (if (= :all refer)
+          (refer qualified-lib)
+          (apply refer qualified-lib :only refer)))
       (dosync
        (commute @#'clojure.core/*loaded-libs* conj qualified-lib))
       qualified-lib)
     (clojure.core/require orig-args)))
-
-(defn- ns-clause [[clause-type & args]]
-  (if (= :require clause-type)
-    
-    (cons clause-type args)))
 
 (defn- require? [[clause-type & _]]
   (= clause-type :require))
