@@ -32,8 +32,8 @@
 (defn require [[lib & {:as opts} :as orig-args]]
   (if-let [rev (:rev opts)]
     (let [qualified-lib (qualify lib rev)]
-      ;; no need to support :reload with immutable namespaces
-      (when-not (contains? @@#'clojure.core/*loaded-libs* qualified-lib)
+      (when (or (not (contains? @@#'clojure.core/*loaded-libs* qualified-lib))
+                (:reload opts))
         (load rev))
       (when-let [as (:as opts)]
         (ns-unalias *ns* as)
